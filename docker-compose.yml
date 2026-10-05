@@ -1,0 +1,39 @@
+services:
+  analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lab8_analysis
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/workspace/data
+      - ./notebooks:/workspace/notebooks
+      - ./scripts:/workspace/scripts
+      - ./sql:/workspace/sql
+      - ./docs:/workspace/docs
+      - ./requirements.txt:/workspace/requirements.txt:ro
+      - ./docker-compose.yml:/workspace/docker-compose.yml:ro
+      - ./Dockerfile:/workspace/Dockerfile:ro
+      - ./README.md:/workspace/README.md:ro
+    working_dir: /workspace
+    environment:
+      - PYTHONPATH=/workspace
+    restart: unless-stopped
+
+  metabase:
+    build:
+      context: .
+      dockerfile: metabase.Dockerfile
+    container_name: lab8_metabase
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/workspace/data:ro
+      - metabase_data:/metabase-data
+    environment:
+      MB_DB_FILE: /metabase-data/metabase.db
+    restart: unless-stopped
+
+volumes:
+  metabase_data:
