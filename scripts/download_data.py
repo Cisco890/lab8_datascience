@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Descarga taxis amarillos y verdes de la TLC (NYC) en formato Parquet.
 
-Por defecto trabaja con yellow y green del año 2026. Consulta qué meses
-están publicados mediante HEAD, descarga por streaming a un temporal
-``.part`` y renombra al finalizar. Omite archivos locales válidos.
+Por defecto trabaja con yellow y green de los años 2024 y 2026 (se puede elegir
+otro conjunto con ``--years``). Consulta qué meses están publicados mediante
+HEAD, descarga por streaming a un temporal ``.part`` y renombra al finalizar.
+Omite archivos locales válidos, por lo que es incremental.
 """
 
 from __future__ import annotations
@@ -20,11 +21,27 @@ import requests
 
 BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
 DEFAULT_TAXI_TYPES = ("yellow", "green")
-DEFAULT_YEAR = 2026
+DEFAULT_YEARS = (2024, 2026)
 DEFAULT_TIMEOUT = 60
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_WAIT = 2.0
 USER_AGENT = "lab8-datascience-download/1.0"
+
+
+def construir_nombre(tipo: str, anio: int, mes: int) -> str:
+    return f"{tipo}_tripdata_{anio}-{mes:02d}.parquet"
+
+
+def construir_url(tipo: str, anio: int, mes: int) -> str:
+    return f"{BASE_URL}/{construir_nombre(tipo, anio, mes)}"
+
+
+def ruta_destino(
+    tipo: str, anio: int, mes: int, root: Path | None = None
+) -> Path:
+    """data/raw/<tipo>/<anio>/<archivo>.parquet"""
+    root = root or project_root_from()
+    return root / "data" / "raw" / tipo / str(anio) / construir_nombre(tipo, anio, mes)
 
 
 @dataclass
@@ -45,11 +62,11 @@ class MonthStatus:
 
     @property
     def filename(self) -> str:
-        return f"{self.taxi_type}_tripdata_{self.year}-{self.month:02d}.parquet"
+        return construir_nombre(self.taxi_type, self.year, self.month)
 
     @property
     def url(self) -> str:
-        return f"{BASE_URL}/{self.filename}"
+        return construir_url(self.taxi_type, self.year, self.month)
 
 
 @dataclass
@@ -116,6 +133,7 @@ def project_root_from(start: Path | None = None) -> Path:
 
 
 def local_path(root: Path, taxi_type: str, year: int, filename: str) -> Path:
+    """Compatibilidad: ruta a partir del nombre de archivo."""
     return root / "data" / "raw" / taxi_type / str(year) / filename
 
 
@@ -209,6 +227,84 @@ def download_file(
     raise RuntimeError(f"falló descarga de {url}: {last_error}")
 
 
+def _nueva_sesion() -> requests.Session:
+    session = requests.Session()
+    session.headers["User-Agent"] = USER_AGENT
+    return session
+
+
+def verificar(
+    tipo: str,
+    anio: int,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[MonthStatus]:
+    """Compara meses publicados en la TLC con archivos locales no vacíos
+    para un tipo de taxi y un año."""
+    root = root or project_root_from()
+    own_session = session is None
+    session = session or _nueva_sesion()
+    try:
+        statuses = discover_published_months(session, [tipo], anio, timeout)
+        for status in statuses:
+            path = ruta_destino(tipo, anio, status.month, root)
+            status.local_exists = is_valid_local(path)
+            status.local_size = path.stat().st_size if path.exists() else 0
+        return statuses
+    finally:
+        if own_session:
+            session.close()
+
+
+def descargar(
+    tipo: str,
+    anio: int,
+    root: Path | None = None,
+    session: requests.Session | None = None,
+    retries: int = DEFAULT_RETRIES,
+    timeout: int = DEFAULT_TIMEOUT,
+) -> list[MonthStatus]:
+    """Descarga los meses publicados que falten para un tipo y año.
+
+    Nunca toca otros años y nunca vuelve a descargar un archivo local válido.
+    """
+    root = root or project_root_from()
+    own_session = session is None
+    session = session or _nueva_sesion()
+    try:
+        statuses = discover_published_months(session, [tipo], anio, timeout)
+        for status in statuses:
+            path = ruta_destino(tipo, anio, status.month, root)
+            if is_valid_local(path):
+                status.local_exists = True
+                status.local_size = path.stat().st_size
+                if status.published:
+                    status.skipped_existing = True
+                continue
+            if not status.published:
+                continue
+
+            logging.info("Descargando %s", status.filename)
+            try:
+                size = download_file(
+                    session, status.url, path, retries=retries, timeout=timeout
+                )
+                status.downloaded = True
+                status.local_exists = True
+                status.local_size = size
+                print(f"OK  {status.filename} ({size:,} bytes)")
+            except RuntimeError as exc:
+                status.failed = True
+                status.error = str(exc)
+                logging.error("%s", exc)
+                print(f"ERR {status.filename}: {exc}")
+        return statuses
+    finally:
+        if own_session:
+            session.close()
+
+
 def verify_completeness(
     root: Path,
     taxi_types: Iterable[str],
@@ -216,39 +312,22 @@ def verify_completeness(
     session: requests.Session | None = None,
     timeout: int = DEFAULT_TIMEOUT,
 ) -> DownloadSummary:
-    """Compara meses publicados en TLC con archivos locales no vacíos."""
-    own_session = session is None
-    session = session or requests.Session()
-    session.headers.setdefault("User-Agent", USER_AGENT)
-
-    try:
-        statuses = discover_published_months(session, taxi_types, year, timeout)
-        for status in statuses:
-            path = local_path(root, status.taxi_type, year, status.filename)
-            status.local_exists = is_valid_local(path)
-            status.local_size = path.stat().st_size if path.exists() else 0
-
-        summary = DownloadSummary(statuses=statuses)
-        return summary
-    finally:
-        if own_session:
-            session.close()
+    """Compatibilidad con el notebook: verifica varios tipos para un año."""
+    statuses: list[MonthStatus] = []
+    for tipo in taxi_types:
+        statuses += verificar(tipo, year, root, session, timeout)
+    return DownloadSummary(statuses=statuses)
 
 
 def print_verification(summary: DownloadSummary) -> bool:
-    """Imprime el informe de verificación.
+    """Imprime la verificación por (tipo, año).
 
     Returns:
         True si todos los meses publicados están presentes localmente.
     """
     published = summary.by_flag("published")
     missing = [s for s in published if not s.local_exists]
-    unexpected: list[str] = []
-
-    # Archivos locales inesperados: presentes pero no publicados (raro)
-    for status in summary.statuses:
-        if status.local_exists and not status.published:
-            unexpected.append(status.filename)
+    unexpected = [s for s in summary.statuses if s.local_exists and not s.published]
 
     print("\n=== Verificación de completitud ===")
     print(
@@ -260,125 +339,59 @@ def print_verification(summary: DownloadSummary) -> bool:
     print(f"Ausentes:                {len(missing)}")
     print(f"Locales no publicados:   {len(unexpected)}")
 
-    by_type: dict[str, list[MonthStatus]] = {}
+    groups: dict[tuple[str, int], list[MonthStatus]] = {}
     for status in published:
-        by_type.setdefault(status.taxi_type, []).append(status)
+        groups.setdefault((status.taxi_type, status.year), []).append(status)
 
-    for taxi_type, items in by_type.items():
+    for (tipo, anio), items in sorted(groups.items()):
         months = sorted(s.month for s in items if s.local_exists)
         print(
-            f"  {taxi_type}: {len([s for s in items if s.local_exists])}/"
-            f"{len(items)} publicados | meses locales={months}"
+            f"  {tipo} {anio}: {len(months)}/{len(items)} publicados | "
+            f"meses locales={months}"
         )
 
     if missing:
         print("\nMeses publicados ausentes localmente:")
         for status in missing:
             print(f"  - {status.filename}")
-
     if unexpected:
         print("\nArchivos locales sin publicación remota:")
-        for name in unexpected:
-            print(f"  ? {name}")
+        for status in unexpected:
+            print(f"  ? {status.filename}")
 
     complete = len(missing) == 0
     print(f"\nResultado: {'COMPLETO' if complete else 'INCOMPLETO'}")
     return complete
 
 
-def run_download(
-    root: Path,
-    taxi_types: Iterable[str],
-    year: int,
-    retries: int = DEFAULT_RETRIES,
-    timeout: int = DEFAULT_TIMEOUT,
-) -> DownloadSummary:
-    """Descarga todos los meses publicados faltantes."""
-    session = requests.Session()
-    session.headers["User-Agent"] = USER_AGENT
-
-    try:
-        statuses = discover_published_months(session, taxi_types, year, timeout)
-
-        for status in statuses:
-            path = local_path(root, status.taxi_type, year, status.filename)
-            if is_valid_local(path):
-                status.local_exists = True
-                status.local_size = path.stat().st_size
-                if status.published:
-                    status.skipped_existing = True
-                continue
-
-            if not status.published:
-                continue
-
-            logging.info("Descargando %s", status.filename)
-            try:
-                size = download_file(
-                    session,
-                    status.url,
-                    path,
-                    retries=retries,
-                    timeout=timeout,
-                )
-                status.downloaded = True
-                status.local_exists = True
-                status.local_size = size
-                print(f"OK  {status.filename} ({size:,} bytes)")
-            except RuntimeError as exc:
-                status.failed = True
-                status.error = str(exc)
-                logging.error("%s", exc)
-                print(f"ERR {status.filename}: {exc}")
-
-        return DownloadSummary(statuses=statuses)
-    finally:
-        session.close()
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description=(
-            "Descarga y verifica trip records Parquet de TLC "
-            "(yellow/green)."
-        )
+        description="Descarga y verifica trip records Parquet de TLC (yellow/green)."
     )
     parser.add_argument(
-        "--year",
+        "--years",
         type=int,
-        default=DEFAULT_YEAR,
-        help=f"Año a descargar (default: {DEFAULT_YEAR})",
+        nargs="+",
+        default=list(DEFAULT_YEARS),
+        help=f"Años a procesar (default: {' '.join(map(str, DEFAULT_YEARS))})",
     )
     parser.add_argument(
+        "--taxi",
         "--taxi-types",
+        dest="taxi",
         nargs="+",
         default=list(DEFAULT_TAXI_TYPES),
-        choices=["yellow", "green"],
-        help="Tipos de taxi a procesar",
+        choices=list(DEFAULT_TAXI_TYPES),
+        help="Tipos de taxi a procesar (default: yellow green)",
     )
     parser.add_argument(
         "--verify",
         action="store_true",
         help="Solo verificar completitud sin descargar",
     )
-    parser.add_argument(
-        "--retries",
-        type=int,
-        default=DEFAULT_RETRIES,
-        help="Reintentos por archivo",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=DEFAULT_TIMEOUT,
-        help="Timeout HTTP en segundos",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Logging detallado",
-    )
+    parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
+    parser.add_argument("-v", "--verbose", action="store_true")
     return parser
 
 
@@ -395,35 +408,28 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
+    years = sorted(set(args.years))
+    taxis = list(dict.fromkeys(args.taxi))
     (root / "data" / "raw").mkdir(parents=True, exist_ok=True)
 
-    if args.verify:
-        summary = verify_completeness(
-            root,
-            args.taxi_types,
-            args.year,
-            timeout=args.timeout,
-        )
-        complete = print_verification(summary)
-        return 0 if complete else 1
+    statuses: list[MonthStatus] = []
+    session = _nueva_sesion()
+    try:
+        for anio in years:
+            for tipo in taxis:
+                if args.verify:
+                    statuses += verificar(tipo, anio, root, session, args.timeout)
+                else:
+                    statuses += descargar(
+                        tipo, anio, root, session, args.retries, args.timeout
+                    )
+    finally:
+        session.close()
 
-    summary = run_download(
-        root,
-        args.taxi_types,
-        args.year,
-        retries=args.retries,
-        timeout=args.timeout,
-    )
-    summary.print_report()
-
-    # Verificación final
-    verify_summary = verify_completeness(
-        root,
-        args.taxi_types,
-        args.year,
-        timeout=args.timeout,
-    )
-    complete = print_verification(verify_summary)
+    summary = DownloadSummary(statuses=statuses)
+    if not args.verify:
+        summary.print_report()
+    complete = print_verification(summary)
 
     if summary.by_flag("failed"):
         return 1
