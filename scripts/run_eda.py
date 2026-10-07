@@ -10,14 +10,15 @@ import argparse
 
 import pandas as pd
 
-from lab8_common import YEARS_ALL, conectar, correr_eda, q
+from lab8_common import anios_disponibles, conectar, correr_eda, q
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--years", type=int, nargs="+", default=list(YEARS_ALL))
+    ap.add_argument("--years", type=int, nargs="+", default=None, help="por defecto: todos los años descargados")
     ap.add_argument("--plots", action="store_true", help="mostrar las gráficas (requiere entorno gráfico)")
     args = ap.parse_args()
+    args.years = list(args.years or anios_disponibles())
 
     con = conectar(args.years)
     res = correr_eda(con, args.years)

@@ -9,10 +9,9 @@ from __future__ import annotations
 import argparse
 import time
 
-import duckdb
 import pandas as pd
 
-from lab8_common import DB_PATH, DOCS_DIR, THREADS, YEARS_ALL, select_trips, sql_years, years_con_datos
+from lab8_common import DB_PATH, DOCS_DIR, THREADS, nueva_conexion, select_trips, sql_years, years_con_datos
 
 SOURCES = ("parquet", "duckdb_table")
 SCOPES = {"2024": [2024], "2026": [2026], "2024+2026": [2024, 2026]}      # 2026 es parcial
@@ -54,14 +53,13 @@ def benchmark(conns, query_name, body, scope_name, years, repeats):
     return filas
 
 
-def correr(repeats=5):
-    con_pq = duckdb.connect(); con_pq.execute(f"SET threads = {THREADS}")
-    con_tb = duckdb.connect(str(DB_PATH), read_only=True); con_tb.execute(f"SET threads = {THREADS}")
+def correr(repeats=5, scopes=None):
+    con_pq, con_tb = nueva_conexion(), nueva_conexion(DB_PATH, read_only=True)   # misma configuración en ambas
     conns = {"parquet": con_pq, "duckdb_table": con_tb}
     print(f"threads = {THREADS} (ambas conexiones) | {repeats} repeticiones + 1 calentamiento")
     filas = []
     try:
-        for scope_name, years in SCOPES.items():
+        for scope_name, years in (scopes or SCOPES).items():
             if any(len(years_con_datos(t, years)) != len(years) for t in ("yellow", "green")):
                 print("Escenario omitido (faltan datos):", scope_name); continue
             for qn, body in BENCH_QUERIES.items():
@@ -78,7 +76,7 @@ def correr(repeats=5):
 
 def plot_resumen(summary):
     import matplotlib.pyplot as plt
-    orden = [s for s in SCOPES if s in summary.data_scope.unique()]
+    orden = list(dict.fromkeys(summary.data_scope))
     fig, axs = plt.subplots(1, len(orden), figsize=(5.2 * len(orden), 4.2), sharey=True, squeeze=False)
     for ax, sc in zip(axs[0], orden):
         d = summary[summary.data_scope == sc].pivot(index="query_name", columns="source", values="median_ms")

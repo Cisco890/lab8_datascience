@@ -6,10 +6,11 @@ import argparse
 
 import pandas as pd
 
-from lab8_common import DATA_RAW, TAXIS, YEARS_ALL, conectar
+from lab8_common import DATA_RAW, TAXIS, anios_disponibles, conectar
 
 
-def tabla_validacion(con, years=YEARS_ALL) -> pd.DataFrame:
+def tabla_validacion(con, years=None) -> pd.DataFrame:
+    years = list(years or anios_disponibles())
     val = con.execute("""SELECT taxi_type, source_year, COUNT(DISTINCT source_file) AS available_files,
        COUNT(*) AS record_count, MIN(source_month) AS first_month, MAX(source_month) AS last_month
 FROM trips GROUP BY ALL ORDER BY ALL""").fetchdf()
@@ -21,8 +22,9 @@ FROM trips GROUP BY ALL ORDER BY ALL""").fetchdf()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--years", type=int, nargs="+", default=list(YEARS_ALL))
+    ap.add_argument("--years", type=int, nargs="+", default=None)
     a = ap.parse_args()
+    a.years = list(a.years or anios_disponibles())
     v = tabla_validacion(conectar(a.years), a.years)
     print(v.to_string(index=False))
     assert v.record_count.notna().all(), "falta algún tipo/año"

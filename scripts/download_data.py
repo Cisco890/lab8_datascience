@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Descarga taxis amarillos y verdes de la TLC (NYC) en formato Parquet.
 
-Por defecto trabaja con yellow y green de los años 2024 y 2026 (se puede elegir
-otro conjunto con ``--years``). Consulta qué meses están publicados mediante
+Por defecto trabaja con yellow y green de los años 2024, 2025 y 2026 (se puede
+elegir otro conjunto con ``--years``). Consulta qué meses están publicados mediante
 HEAD, descarga por streaming a un temporal ``.part`` y renombra al finalizar.
 Omite archivos locales válidos, por lo que es incremental.
 """
@@ -21,7 +21,7 @@ import requests
 
 BASE_URL = "https://d37ci6vzurychx.cloudfront.net/trip-data"
 DEFAULT_TAXI_TYPES = ("yellow", "green")
-DEFAULT_YEARS = (2024, 2026)
+DEFAULT_YEARS = (2024, 2025, 2026)
 DEFAULT_TIMEOUT = 60
 DEFAULT_RETRIES = 3
 DEFAULT_RETRY_WAIT = 2.0

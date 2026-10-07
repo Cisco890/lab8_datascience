@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import duckdb
@@ -15,7 +16,6 @@ SQL_DIR = PROJECT_ROOT / "sql"
 DOCS_DIR = PROJECT_ROOT / "docs"
 DB_PATH = DATA_PROCESSED / "lab8.duckdb"
 
-YEARS_ALL = (2024, 2026)
 TAXIS = ("yellow", "green")
 PICKUP_COLS = {"yellow": ("tpep_pickup_datetime", "tpep_dropoff_datetime"),
                "green": ("lpep_pickup_datetime", "lpep_dropoff_datetime")}
@@ -29,9 +29,17 @@ FLAGS = ["is_invalid_datetime", "is_negative_distance", "is_zero_distance", "is_
 VALID_RULE = ("NOT (is_invalid_datetime OR is_negative_distance OR is_negative_fare OR "
               "is_negative_total OR is_extreme_speed OR is_extreme_duration)")
 
+# Códigos de payment_type según el diccionario de datos oficial de la TLC
+# (data_dictionary_trip_records_yellow.pdf / _green.pdf, revisión de 2025).
 PAGO = {0: "Flex fare", 1: "Tarjeta", 2: "Efectivo", 3: "Sin cargo", 4: "Disputa", 5: "Desconocido", 6: "Anulado"}
 DIAS = {1: "Lun", 2: "Mar", 3: "Mié", 4: "Jue", 5: "Vie", 6: "Sáb", 7: "Dom"}
 COLOR = {"yellow": "#e0b400", "green": "#2e8b57"}
+
+
+def anios_disponibles(taxis=TAXIS) -> tuple[int, ...]:
+    """Años con al menos un Parquet en data/raw/<taxi>/<anio>/ (se descubren, no se fijan)."""
+    return tuple(sorted({int(d.name) for t in taxis for d in (DATA_RAW / t).glob("[0-9]" * 4)
+                         if any(d.glob("*.parquet"))}))
 
 
 def sql_years(years) -> str:
@@ -105,17 +113,46 @@ FROM derivadas
 """
 
 
-def crear_vistas(con, years=YEARS_ALL) -> None:
+def crear_vistas(con, years=None) -> None:
     """trips -> trips_enriched -> trips_valid (los años sin archivos se omiten)."""
+    years = years or anios_disponibles()
     con.execute("CREATE OR REPLACE TEMP VIEW trips AS\n" + select_trips(years))
-    con.execute("CREATE OR REPLACE TEMP VIEW trips_enriched AS" + SQL_ENRIQUECIDA)
-    con.execute(f"CREATE OR REPLACE TEMP VIEW trips_valid AS SELECT * FROM trips_enriched WHERE {VALID_RULE}")
+    crear_vistas_derivadas(con, temp=True)
 
 
-def conectar(years=YEARS_ALL):
-    """Conexión en memoria con las vistas analíticas creadas."""
-    con = duckdb.connect()
+def crear_vistas_derivadas(con, temp=False) -> None:
+    """trips_enriched y trips_valid sobre una relación `trips` ya existente (vista o tabla)."""
+    kind = "TEMP VIEW" if temp else "VIEW"
+    con.execute(f"CREATE OR REPLACE {kind} trips_enriched AS" + SQL_ENRIQUECIDA)
+    con.execute(f"CREATE OR REPLACE {kind} trips_valid AS SELECT * FROM trips_enriched WHERE {VALID_RULE}")
+
+
+def cargar_sql(path) -> dict[str, str]:
+    """Lee un archivo .sql con bloques `-- name: <id>` y devuelve {id: sql}."""
+    bloques, actual = {}, None
+    for linea in Path(path).read_text(encoding="utf-8").splitlines():
+        m = re.match(r"--\s*name:\s*(\w+)", linea)
+        if m:
+            actual = m.group(1); bloques[actual] = []
+        elif actual:
+            bloques[actual].append(linea)
+    return {k: "\n".join(v).strip().rstrip(";") for k, v in bloques.items()}
+
+
+def nueva_conexion(database=":memory:", read_only=False):
+    """Conexión DuckDB con la misma configuración en todo el proyecto (hilos fijos, sin barra de progreso)."""
+    con = duckdb.connect(str(database), read_only=read_only)
     con.execute(f"SET threads = {THREADS}")
+    try:
+        con.execute("SET enable_progress_bar = false")
+    except duckdb.Error:      # DuckDB 1.1 en Jupyter sin ipywidgets: la barra ya está inactiva
+        pass
+    return con
+
+
+def conectar(years=None):
+    """Conexión en memoria con las vistas analíticas creadas."""
+    con = nueva_conexion()
     crear_vistas(con, years)
     return con
 

@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Crea data/processed/lab8.duckdb con la tabla `trips` (idempotente)."""
+"""Crea data/processed/lab8.duckdb con la tabla `trips` y las vistas trips_enriched / trips_valid (idempotente)."""
 from __future__ import annotations
 
 import argparse
 import time
 
-import duckdb
+from lab8_common import (DATA_RAW, DB_PATH, PROJECT_ROOT, TAXIS, anios_disponibles, crear_vistas_derivadas, nueva_conexion,
+                         select_trips)
 
-from lab8_common import DATA_RAW, DB_PATH, PROJECT_ROOT, TAXIS, THREADS, YEARS_ALL, select_trips
 
-
-def materializar(years=YEARS_ALL, db_path=DB_PATH):
+def materializar(years=None, db_path=DB_PATH):
     """CREATE OR REPLACE TABLE; cierra la conexión de escritura al terminar (evita bloqueos con Metabase)."""
+    years = list(years or anios_disponibles())
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    wcon = duckdb.connect(str(db_path))
+    wcon = nueva_conexion(db_path)
     try:
-        wcon.execute(f"SET threads = {THREADS}")
         t0 = time.perf_counter()
         wcon.execute("CREATE OR REPLACE TABLE trips AS\n" + select_trips(years))
+        crear_vistas_derivadas(wcon)          # vistas persistentes (las usa también Metabase)
         wcon.execute("CHECKPOINT")
         segundos = time.perf_counter() - t0
         total = wcon.execute("SELECT COUNT(*) FROM trips").fetchone()[0]
@@ -30,9 +30,12 @@ def materializar(years=YEARS_ALL, db_path=DB_PATH):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--years", type=int, nargs="+", default=list(YEARS_ALL))
+    ap.add_argument("--years", type=int, nargs="+", default=None, help="por defecto: todos los años descargados")
     a = ap.parse_args()
-    assert "*.duckdb" in (PROJECT_ROOT / ".gitignore").read_text(), "lab8.duckdb debe estar en .gitignore"
+    a.years = list(a.years or anios_disponibles())
+    gitignore = PROJECT_ROOT / ".gitignore"
+    if gitignore.is_file():
+        assert "*.duckdb" in gitignore.read_text(), "lab8.duckdb debe estar en .gitignore"
 
     seg, total, por_anio, por_taxi = materializar(a.years)
     size_db = DB_PATH.stat().st_size / 2**20

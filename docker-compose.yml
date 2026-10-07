@@ -16,6 +16,7 @@ services:
       - ./docker-compose.yml:/workspace/docker-compose.yml:ro
       - ./Dockerfile:/workspace/Dockerfile:ro
       - ./README.md:/workspace/README.md:ro
+      - ./.gitignore:/workspace/.gitignore:ro
     working_dir: /workspace
     environment:
       - PYTHONPATH=/workspace
